@@ -1,4 +1,4 @@
-module hello-memgraph
+module chain-traverser
 
 go 1.22.0
 
