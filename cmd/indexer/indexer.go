@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"chain-traverser/internal/storage/redis"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -58,7 +58,7 @@ func setBlockNumber(blockNumber *big.Int) error {
 func handleBlock(
 	blockNumber *big.Int,
 	client *ethclient.Client,
-	redis *redis.Client,
+	redis *redis.RedisClient,
 	ctx context.Context,
 ) *map[string]int64 {
 	block, err := client.BlockByNumber(ctx, blockNumber)
@@ -95,34 +95,8 @@ func handleBlock(
 			blob += fmt.Sprintf("%s;%s;%s\n", fromHash, tx.Hash().Hex(), toHash)
 		}
 	}
-	go addBlock(blockNumber, blob, redis, ctx)
+	go redis.AddBlock(blockNumber, &blob)
 	return &transMap
-}
-
-func updateCounters(transMap map[string]int64, redis *redis.Client, ctx context.Context) {
-	for address, count := range transMap {
-		key := fmt.Sprintf("c:%s", address)
-		err := redis.IncrBy(ctx, key, count)
-		if err.Err() != nil {
-			log.Err(err.Err()).Msg("Cant increment counter")
-		}
-	}
-}
-func appendBlocks(transMap map[string]int64, blockNumber *big.Int, redis *redis.Client, ctx context.Context) {
-	for address, _ := range transMap {
-		key := fmt.Sprintf("b:%s", address)
-		err := redis.RPush(ctx, key, blockNumber.String())
-		if err.Err() != nil {
-			log.Err(err.Err()).Msg("Cant append block to wallet")
-		}
-	}
-}
-func addBlock(blockNumber *big.Int, blob string, redis *redis.Client, ctx context.Context) {
-	key := fmt.Sprintf("tx:%s", blockNumber)
-	err := redis.Set(ctx, key, blob, 0)
-	if err.Err() != nil {
-		log.Err(err.Err()).Msg("cant add block")
-	}
 }
 
 // func appendBlockTimestamp(transMap map[string]int64, blockNumber *big.Int, redis *redis.Client, ctx context.Context) {
@@ -132,11 +106,7 @@ func addBlock(blockNumber *big.Int, blob string, redis *redis.Client, ctx contex
 func main() {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
-	redis := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
+	redis := redis.NewClient()
 
 	ctx := context.Background()
 
@@ -184,8 +154,8 @@ func main() {
 			}
 			// fmt.Printf("start storing block: %s\n", blockNumber)
 
-			go updateCounters(*result, redis, ctx)
-			go appendBlocks(*result, blockNumber, redis, ctx)
+			go redis.UpdateCounters(*result)
+			go redis.AppendBlockNumbers(*result, blockNumber)
 
 			// log.Debug().Msgf("handled block: %s\n", blockNumber)
 

@@ -1,8 +1,8 @@
 package main
 
 import (
+	"chain-traverser/internal/storage/redis"
 	"context"
-	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -29,16 +28,6 @@ type Addr struct {
 	needTraverse bool
 }
 
-func getAddressTxNumber(addr *string, redis *redis.Client, ctx context.Context) (int64, error) {
-	key := fmt.Sprintf("c:%s", *addr)
-	val, err := redis.Get(ctx, key).Int64()
-	if err != nil {
-		log.Err(err).Msg("Cant get counter")
-	}
-	log.Debug().Msgf("got counter %d for %s", val, *addr)
-	return val, nil
-}
-
 type CntRes struct {
 	key *string
 	cnt int64
@@ -48,13 +37,13 @@ type CntErr struct {
 	err error
 }
 
-func setCounters(addrs *map[string]Addr, redis *redis.Client, ctx context.Context) error {
+func setCounters(addrs *map[string]Addr, storage *redis.RedisClient) error {
 	resChan := make(chan CntRes, len(*addrs))
 	errChan := make(chan CntErr, len(*addrs))
 	// log.Debug().Msgf("addrs %s", addrs)
 	for key, _ := range *addrs {
 		go func(key *string) {
-			cnt, err := getAddressTxNumber(key, redis, ctx)
+			cnt, err := storage.GetAddressTxNumber(key)
 			if err != nil {
 				errChan <- CntErr{key: key, err: err}
 			} else {
@@ -84,20 +73,7 @@ func setCounters(addrs *map[string]Addr, redis *redis.Client, ctx context.Contex
 	return nil
 }
 
-func getAddressBlocks(addr *string, redis *redis.Client, ctx context.Context) (*[]string, error) {
-	key := fmt.Sprintf("b:%s", *addr)
-	log.Info().Msgf("getting blocks for %s", key)
-	slice, err := redis.LRange(ctx, key, 0, 1000).Result()
-	if err != nil {
-		log.Err(err).Msg("Cant get block list")
-		return nil, err
-	}
-	// log.Debug().Msgf("blocks %s", slice)
-	log.Debug().Msgf("blocks %d", len(slice))
-	return &slice, nil
-}
-
-func getBlocks(addrs *map[string]Addr, redis *redis.Client, ctx context.Context) (*[]string, error) {
+func getBlocks(addrs *map[string]Addr, storage *redis.RedisClient) (*[]string, error) {
 	// blocks, err := getAddressBlocks(addrs, redis, ctx)
 	// if err != nil {
 	// 	return nil, err
@@ -115,7 +91,7 @@ func getBlocks(addrs *map[string]Addr, redis *redis.Client, ctx context.Context)
 	errChan := make(chan error, len(*addrs))
 	for _, key := range traverseAddrs {
 		go func(key *string) {
-			bSlice, err := getAddressBlocks(key, redis, ctx)
+			bSlice, err := storage.GetAddressBlocks(key)
 			if err != nil {
 				errChan <- err
 			} else {
@@ -171,24 +147,13 @@ func getTransactionsByBlockNumber(blockNumber string, address string, client *et
 	return &txs, nil
 }
 
-func getBlockRedis(blockNumber string, redis *redis.Client, ctx context.Context) (*string, error) {
-	// start := time.Now()
-	key := fmt.Sprintf("tx:%s", blockNumber)
-	val, err := redis.Get(ctx, key).Result()
-	if err != nil {
-		log.Err(err).Msg("Cant get block")
-		return nil, err
-	}
-	// log.Debug().Msgf("get block data %s in %s", blockNumber, time.Since(start))
-	return &val, nil
-}
-func getTransactionsByBlockNumber2(blockNumber string, addrs *map[string]Addr, redis *redis.Client, ctx context.Context) (*[]Tx, error) {
+func getTransactionsByBlockNumber2(blockNumber string, addrs *map[string]Addr, storage *redis.RedisClient, ctx context.Context) (*[]Tx, error) {
 	// start := time.Now()
 
 	bigInt := new(big.Int)
 	bigInt.SetString(blockNumber, 10)
 
-	block, err := getBlockRedis(blockNumber, redis, ctx)
+	block, err := storage.GetBlock(&blockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -226,13 +191,13 @@ func getTransactionsByBlockNumber2(blockNumber string, addrs *map[string]Addr, r
 	return &txs, nil
 }
 
-func getAddressTransactions(addrs map[string]Addr, redis *redis.Client, client *ethclient.Client, ctx context.Context, depth uint8) (*[]Tx, error) {
+func getAddressTransactions(addrs map[string]Addr, redis *redis.RedisClient, client *ethclient.Client, ctx context.Context, depth uint8) (*[]Tx, error) {
 	log.Debug().Msgf("getAddressTransactions %d", depth)
 	if depth == 0 {
 		return nil, nil
 	}
 
-	err := setCounters(&addrs, redis, ctx)
+	err := setCounters(&addrs, redis)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +205,7 @@ func getAddressTransactions(addrs map[string]Addr, redis *redis.Client, client *
 	// for key, addr := range addrs {
 	// 	log.Debug().Msgf("addr %s %d %t", key, addr.cnt, addr.needTraverse)
 	// }
-	blocks, err := getBlocks(&addrs, redis, ctx)
+	blocks, err := getBlocks(&addrs, redis)
 	if err != nil {
 		return nil, err
 	}
@@ -305,11 +270,13 @@ func main() {
 
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 
-	redis := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
+	// redis := redis.NewClient(&redis.Options{
+	// 	Addr:     "localhost:6379",
+	// 	Password: "", // no password set
+	// 	DB:       0,  // use default DB
+	// })
+
+	redis := redis.NewClient()
 
 	ctx := context.Background()
 
